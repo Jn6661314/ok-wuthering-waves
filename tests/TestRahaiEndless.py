@@ -109,6 +109,28 @@ class EndlessDetectionTest(unittest.TestCase):
         self.assertTrue(task._endless_ingame())
         self.assertEqual(task._endless_goal(), 9999)
 
+    def test_normal_stage_board_is_not_endless(self):
+        """普通关卡对局内也有标题和棋盘: 不能只凭棋盘判定无尽模式。"""
+        task = make_task(['拉海洛方块'])
+        task._playable_board = Mock(return_value=stable_boards()[0])
+        self.assertFalse(task._endless_ingame())
+
+    def test_return_to_list_from_endless_details_page(self):
+        """无尽详情页没有「关卡目标」: 也要点返回, 否则退出无尽后直接报错。"""
+        task = make_task(['拉海洛方块', '无尽模式'])
+        task._stage_list = Mock(side_effect=[[], [('title', 'status')]])
+        task.click = Mock()
+        self.assertEqual(task._return_to_list(), [('title', 'status')])
+        task.click.assert_called_once()
+        self.assertEqual(task.click.call_args[0][:2], (.942, .06))
+
+    def test_return_to_list_on_list_page_does_not_click_back(self):
+        task = make_task(['拉海洛方块'])
+        task._stage_list = Mock(return_value=[('title', 'status')])
+        task.click = Mock()
+        self.assertEqual(task._return_to_list(), [('title', 'status')])
+        task.click.assert_not_called()
+
     def test_endless_goal_missing(self):
         task = make_task(['拉海洛方块', '无尽模式'])
         self.assertIsNone(task._endless_goal())
@@ -150,6 +172,21 @@ class DirectStartTest(unittest.TestCase):
         task = make_task(['拉海洛方块'])
         with self.assertRaises(ChallengeFailed):
             task._challenge_current_details('interaction')
+
+    def test_run_starts_directly_on_endless_details_page(self):
+        """无尽详情页没有「关卡目标」: run() 不能报「请先打开…」。"""
+        task = make_task(['拉海洛方块', '无尽模式', '开始挑战'])
+        task._make_interaction = Mock(return_value='interaction')
+        task._stage_list = Mock(return_value=[])
+        task._stage_details = Mock(return_value=None)
+        task._challenge_endless = Mock()
+        task._return_to_list = Mock(return_value=[])
+        task._first_page = Mock(side_effect=RuntimeError('stop-after-endless'))
+        with patch('src.task.RahaiBlocksTask.canonical_frame', return_value=object()):
+            with self.assertRaises(RuntimeError) as caught:
+                task.run()
+        self.assertIn('stop-after-endless', str(caught.exception))
+        task._challenge_endless.assert_called_once()
 
 
 class EndlessPlayTest(unittest.TestCase):

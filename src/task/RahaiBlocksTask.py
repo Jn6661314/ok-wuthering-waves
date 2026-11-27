@@ -93,13 +93,18 @@ class RahaiBlocksTask(BaseTask):
                      or self.ocr(.0, .10, .35, .25, match=ENDLESS_INGAME_RE)))
 
     def _endless_ingame(self):
-        """已在无尽模式对局内（玩法弹窗未关 / 局内计分 UI 可见 / 棋盘可见）。"""
+        """已在无尽模式对局内（玩法弹窗未关 / 局内计分与目标文案可见）。
+
+        普通关卡进入对局后同样有「拉海洛方块」标题和可玩的棋盘，所以棋盘本身
+        不能当作无尽模式的证据：刚点完「开始挑战」的 1.3 秒内普通关卡通常已经
+        画出棋盘，用棋盘判断会把普通关卡当成无尽模式打（无尽流程失败时只是
+        返回 "dead"/"ended"，不抛 ChallengeFailed，于是被误报成「已通关」）。
+        只有无尽模式专属文案才算正证据。
+        """
         if not self._event_title():
             return False
-        if (self.ocr(.0, .10, .7, .75, match=ENDLESS_POPUP_RE)
-                or self.ocr(.0, .10, .35, .25, match=ENDLESS_INGAME_RE)):
-            return True
-        return bool(self._playable_board())
+        return bool(self.ocr(.0, .10, .7, .75, match=ENDLESS_POPUP_RE)
+                    or self.ocr(.0, .10, .35, .25, match=ENDLESS_INGAME_RE))
 
     def _endless_goal(self):
         """无尽模式目标分数（局内文案「达到9999分结算可得首通奖励」）。"""
@@ -156,8 +161,18 @@ class RahaiBlocksTask(BaseTask):
         raise RuntimeError("无法定位到拉海洛方块关卡列表起点。")
 
     def _return_to_list(self):
-        if self._stage_details():
-            self.click(.942, .06, after_sleep=.45)
+        """退回到关卡列表：普通详情页、无尽详情页、奖励结算页都要能退出去。
+
+        无尽模式详情页没有「关卡目标」，_stage_details() 为假；只按它判断的话，
+        从无尽对局退出后会停在详情页上直接报「无法返回关卡列表」。
+        """
+        for _ in range(3):
+            stages = self.wait_until(self._stage_list, time_out=3)
+            if stages:
+                return stages
+            if not (self._stage_details() or self._endless_page()):
+                break
+            self.click(.942, .06, after_sleep=.6)
         stages = self.wait_until(self._stage_list, time_out=5)
         if not stages:
             raise RuntimeError("挑战结束后无法返回关卡列表。")
@@ -223,7 +238,9 @@ class RahaiBlocksTask(BaseTask):
             raise ChallengeFailed("开始挑战按钮未响应。")
         try:
             self.next_frame()
-            if self._endless_page() or self._endless_ingame():
+            # 只认无尽模式的正证据：普通关卡这里同样有棋盘、也能读到活动标题，
+            # 用 _endless_page() 判断会把普通关卡错送进无尽流程。
+            if self._endless_ingame():
                 self.log_info("进入的是无尽模式，转无尽对局流程。")
                 self._play_endless_round(interaction)
                 return
@@ -340,8 +357,11 @@ class RahaiBlocksTask(BaseTask):
                 except ChallengeFailed as error:
                     self.log_warning(f"关卡页面直接开始失败：{error}")
                 stages = self._return_to_list()
-            elif self._endless_ingame():
-                self.log_info("检测到无尽模式对局，直接加入继续游玩。")
+            elif self._endless_page() and (self._challenge_button(wide=True) or self._endless_ingame()):
+                # 无尽模式详情页没有「关卡目标」和难度页签，只靠 _stage_details()
+                # 判断会落到下面的报错分支；这里单独认无尽页面（要有开始按钮，
+                # 否则说明只是画面上碰巧出现了「无尽模式」字样）。
+                self.log_info("当前已在无尽模式页面，直接开始（进行中的对局则继续游玩）。")
                 try:
                     self._challenge_endless(interaction)
                 except ChallengeFailed as error:
