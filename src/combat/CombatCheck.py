@@ -108,6 +108,12 @@ class CombatCheck(BaseWWTask):
         False when the target is really lost; in that case ``target_lost_give_up``
         is set so the calling task can decide what to do next (e.g. move to the
         next nest). Only active for tasks that set ``target_enemy_retry_count``.
+
+        ``has_health`` is the positive evidence that the enemy is still alive: a
+        leftover health bar means it flew out of lock range. Without it the
+        combat simply ended normally (all enemies dead), so retrying would only
+        waste ``retries * timeout`` seconds on every clear and would make the
+        caller skip the echo search.
         """
         # Only a real positive integer opts in. getattr + isinstance keeps this
         # inert for partial mocks of CombatCheck used by rotation tests.
@@ -115,6 +121,10 @@ class CombatCheck(BaseWWTask):
         if not isinstance(retries, int) or retries <= 0:
             return False
         if self._target_retried_this_episode:
+            return False
+        if not has_health:
+            # 没有血条 = 敌人已被击杀, 属于正常结束战斗。既不复锁, 也不设置
+            # target_lost_give_up, 让任务继续走找声骸流程。
             return False
         self._target_retried_this_episode = True
         for attempt in range(1, retries + 1):

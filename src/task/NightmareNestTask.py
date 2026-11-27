@@ -108,11 +108,58 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
             self._capture_success = True
         return self._capture_success
 
-    def _skip_nest_after_target_lost(self, is_team):
+    def _skip_nest_after_target_lost(self, nest, is_team):
         """重锁多次仍失败: 结束当前聚落, 让主循环去图鉴找下一个。"""
+        if isinstance(nest, NestTarget):
+            # 不记下来的话图鉴里这个聚落还是 0/N, get_nest_to_go() 会立刻再把
+            # 同一个聚落找回来, 主循环在同一点原地打转。
+            self._unreachable_nests.add(nest.cache_key)
         self.log_info(self.tr('聚落目标多次重锁失败，跳过当前聚落去找下一个。'), notify=True)
         if is_team:
             self.esc_world_confirm()
+
+    def _target_lost_without_pickup(self):
+        """本次战斗结束是「目标飞走」还是「正常清场」?
+
+        敌人被击杀时通常会有 F 拾取提示; 没有提示并不能证明敌人还活着(掉落可能
+        还没刷出来), 所以这里只做一个标记, 后续照常走找声骸流程, 真的什么都没
+        找到才跳过聚落 —— 不能因为缺少 F 提示就跳过 walk_find_echo / yolo_find_echo。
+        """
+        if not getattr(self, 'target_lost_give_up', False):
+            return False
+        self.next_frame()
+        if self.find_f_with_text():
+            self.target_lost_give_up = False
+            return False
+        self.log_info(self.tr('target lost without pickup prompt, search echo before skipping nest'))
+        return True
+
+    def _find_echo(self, is_team, nest, target_box):
+        """收取本聚落掉落的声骸: 原地走一圈 -> 全向搜索 -> 重传送兜底。"""
+        if self.walk_find_echo(time_out=5, backward_time=2.5):
+            self.log_info(self.tr('farm echo walk find true'))
+            return True
+        dropped = self.yolo_find_echo(turn=True, use_color=False, time_out=30)[0]
+        logger.info(f'farm echo yolo find {dropped}')
+        if dropped or is_team:
+            return bool(dropped)
+        # 保底：没有收取到声骸时，重新打开图鉴传送回当前聚落（传送点面朝金色声骸群），再搜索一次
+        self.log_info(self.tr('no echo collected, re-teleport to current nest as fallback'))
+        self.ensure_main(time_out=30)
+        self.openF2Book("gray_book_boss")
+        getattr(self, self._nest_tab_of_current_nest)()
+        self.sleep(1)
+        self.click(target_box, after_sleep=2)
+        if self.wait_feature(TRAVEL_FEATURES, time_out=5, settle_time=0.5,
+                             raise_if_not_found=False) and self._travel_to_nest_or_skip(nest):
+            self.sleep(2)
+            self.run_until(lambda: False, 'w', time_out=2, running=True)
+            if self.walk_find_echo(time_out=5, backward_time=2.5):
+                self.log_info(self.tr('farm echo walk find true after re-teleport'))
+                return True
+            dropped = self.yolo_find_echo(turn=True, use_color=False, time_out=30)[0]
+            logger.info(f'farm echo yolo find after re-teleport {dropped}')
+        return bool(dropped)
 
     def combat_nest(self, nest):
         self.target_lost_give_up = False
@@ -138,14 +185,6 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
             try:
                 need_find = self.combat_once(wait_combat_time=wait_combat_time, target=True,
                                              raise_if_not_found=False)
-                if getattr(self, 'target_lost_give_up', False):
-                    # 敌人真死了会有 F 拾取提示; 没有掉落说明是飞走/丢失,
-                    # 直接去下一个聚落, 不再原地找声骸/追出边界。
-                    self.next_frame()
-                    if not self.find_f_with_text():
-                        self._skip_nest_after_target_lost(is_team)
-                        return
-                    self.target_lost_give_up = False
             except CharRevivedException:
                 if isinstance(nest, NestTarget):
                     deaths = self._nest_deaths.get(nest.cache_key, 0) + 1
@@ -157,6 +196,7 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
                         return
                 self.log_info(self.tr('nightmare nest: death recovered, re-enter from F2 book'))
                 return
+            target_lost = self._target_lost_without_pickup()
             captured_early = False
             if self._capture_mode:
                 if self._capture_success or self.wait_until(self.has_echo_notification, time_out=3):
@@ -164,31 +204,12 @@ class NightmareNestTask(WWOneTimeTask, BaseCombatTask):
                     captured_early = True
             if not captured_early:
                 self.sleep(3)
-                if need_find and not self.walk_find_echo(time_out=5, backward_time=2.5):
-                    dropped = self.yolo_find_echo(turn=True, use_color=False, time_out=30)[0]
-                    logger.info(f'farm echo yolo find {dropped}')
-                    if not dropped and not is_team:
-                        # 保底：没有收取到声骸时，重新打开图鉴传送回当前聚落（传送点面朝金色声骸群），再搜索一次
-                        self.log_info(self.tr('no echo collected, re-teleport to current nest as fallback'))
-                        self.ensure_main(time_out=30)
-                        self.openF2Book("gray_book_boss")
-                        getattr(self, self._nest_tab_of_current_nest)()
-                        self.sleep(1)
-                        self.click(target_box, after_sleep=2)
-                        if self.wait_feature(TRAVEL_FEATURES, time_out=5, settle_time=0.5,
-                                            raise_if_not_found=False) and self._travel_to_nest_or_skip(nest):
-                            self.sleep(2)
-                            self.run_until(lambda: False, 'w', time_out=2, running=True)
-                            if not self.walk_find_echo(time_out=5, backward_time=2.5):
-                                dropped = self.yolo_find_echo(turn=True, use_color=False, time_out=30)[0]
-                                logger.info(f'farm echo yolo find after re-teleport {dropped}')
-                            else:
-                                dropped = True
-                                self.log_info(self.tr('farm echo walk find true after re-teleport'))
-                else:
-                    dropped = True
-                    self.log_info(self.tr('farm echo walk find true'))
+                dropped = self._find_echo(is_team, nest, target_box) if need_find or target_lost else True
                 self._capture_success = dropped
+            if target_lost and not self._capture_success:
+                # 目标飞走且这一圈也没捡到声骸: 去下一个聚落, 不追出边界。
+                self._skip_nest_after_target_lost(nest, is_team)
+                return
             if not self._should_continue_combat_after_pickup():
                 break
             self.log_info(self.tr('nightmare nest: combat detected after pickup'))
